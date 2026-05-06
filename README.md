@@ -42,7 +42,7 @@ where disagreement is the standard deviation across user predictions.
 Clone and enter the project:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Arell-Git/cinematch_cli.git
 cd ltrboxd_scraper
 ```
 
@@ -77,11 +77,6 @@ Runs guided prompts for profile and movie validation:
 python -m cinematch
 ```
 
-Equivalent:
-
-```bash
-python -m cinematch interactive
-```
 
 Optional flags:
 
@@ -89,7 +84,6 @@ Optional flags:
 - `--lambda <float>` (default: `1.0`)
 - `--profile-limit <int>` (default: `300`)
 - `--top-cast <int>` (default: `3`)
-- `--force-enrich` (rebuild enriched CSVs)
 
 ### 2) Batch mode
 
