@@ -34,6 +34,19 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
+def _yes_no(prompt: str, default: bool = True) -> bool:
+    suffix = " [Y/n] " if default else " [y/N] "
+    while True:
+        answer = input(prompt + suffix).strip().casefold()
+        if not answer:
+            return default
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        print("Please answer y or n.")
+
+
 def _load_user_class():
     repo_root = Path(__file__).resolve().parents[1]
     local_pkg_root = repo_root / "letterboxdpy"
@@ -70,6 +83,14 @@ def _tmdb_request(endpoint: str, params: dict) -> dict:
     resp = requests.get(f"{TMDB_BASE_URL}{endpoint}", params=full_params, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def _search_tmdb_movies(title: str, year: int | None = None, limit: int = 5) -> list[dict]:
+    params: dict = {"query": title}
+    if year is not None:
+        params["year"] = year
+    results = _tmdb_request("/search/movie", params=params).get("results", [])
+    return results[:limit]
 
 
 def _fetch_tmdb_enrichment(title: str, year: int | None = None, top_cast: int = 3) -> dict | None:
@@ -148,6 +169,12 @@ def _rated_movies_for_user(username: str) -> list[dict]:
     return rated_movies
 
 
+def _profile_summary(username: str) -> dict:
+    rated_movies = _rated_movies_for_user(username)
+    titles = [movie["title"] for movie in rated_movies[:5]]
+    return {"rated": len(rated_movies), "titles": titles}
+
+
 def ensure_enriched_csv(
     username: str,
     enriched_dir: Path,
@@ -185,6 +212,99 @@ def ensure_enriched_csv(
         f"(skipped {failures}) -> {out_path}"
     )
     return out_path
+
+
+def _candidate_row(enriched: dict) -> pd.DataFrame:
+    row = {**enriched, "rating": None}
+    return pd.DataFrame([row], columns=ENRICHED_COLUMNS)
+
+
+def _release_year(match: dict) -> int | None:
+    release_date = match.get("release_date")
+    if not release_date:
+        return None
+    try:
+        return int(str(release_date)[:4])
+    except ValueError:
+        return None
+
+
+def print_movie_summary(movie: pd.DataFrame, heading: str = "Selected movie") -> None:
+    row = movie.iloc[0]
+    title = row.get("title", "Unknown")
+    year = row.get("year")
+    year_text = "unknown year" if pd.isna(year) else str(int(float(year)))
+    director = ", ".join([part for part in str(row.get("director", "")).split("|") if part]) or "unknown"
+    genres = ", ".join([part for part in str(row.get("genres", "")).split("|") if part]) or "unknown"
+    print()
+    print(f"{heading}: {title} ({year_text})")
+    print(f"  Director: {director}")
+    print(f"  Genres: {genres}")
+
+
+def confirm_candidate_movie(raw_movie: str, top_cast: int, match_limit: int = 5) -> pd.DataFrame | None:
+    title, year = _parse_movie_input(raw_movie)
+    while True:
+        if not title:
+            candidate = input("Type a movie title, or s to skip: ").strip()
+            if candidate.casefold() in {"s", "skip"}:
+                return None
+            title, year = _parse_movie_input(candidate)
+            continue
+
+        matches = _search_tmdb_movies(title, year, limit=match_limit)
+        if not matches:
+            print(f"No TMDB matches for {title!r}.")
+            candidate = input("Type a corrected title, or s to skip: ").strip()
+            if candidate.casefold() in {"s", "skip"}:
+                return None
+            title, year = _parse_movie_input(candidate)
+            continue
+
+        print(f"\nTop TMDB matches for {title!r}:")
+        for i, match in enumerate(matches, start=1):
+            match_title = match.get("title") or "Untitled"
+            match_year = _release_year(match) or "unknown year"
+            print(f"  {i}. {match_title} ({match_year})")
+        print("  Enter: choose 1")
+        print("  r: search again with a corrected title")
+        print("  s: skip this movie")
+
+        choice = input(f"Choose 1-{len(matches)}, Enter for 1, r, or s: ").strip().casefold()
+        if choice in {"s", "skip"}:
+            return None
+        if choice in {"r", "retry"}:
+            corrected = input("Type corrected title: ").strip()
+            title, year = _parse_movie_input(corrected)
+            continue
+        if not choice:
+            idx = 1
+        elif choice.isdigit() and 1 <= int(choice) <= len(matches):
+            idx = int(choice)
+        else:
+            corrected = input("Invalid choice. Type corrected title or s to skip: ").strip()
+            if corrected.casefold() in {"s", "skip"}:
+                return None
+            title, year = _parse_movie_input(corrected)
+            continue
+
+        match = matches[idx - 1]
+        enriched = _fetch_tmdb_enrichment(
+            title=match.get("title") or title,
+            year=_release_year(match) or year,
+            top_cast=top_cast,
+        )
+        if enriched is None:
+            print("TMDB enrichment failed for selection, try again.")
+            continue
+        movie = _candidate_row(enriched)
+        print_movie_summary(movie)
+        if _yes_no("Use this movie?", default=True):
+            return movie
+        corrected = input("Type corrected title, or s to skip: ").strip()
+        if corrected.casefold() in {"s", "skip"}:
+            return None
+        title, year = _parse_movie_input(corrected)
 
 
 def score_candidate_frame(encoder, models, users: list[str], candidates: pd.DataFrame, lam: float) -> pd.DataFrame:
@@ -255,6 +375,75 @@ def _build_candidate_frame(candidates: list[str], top_cast: int) -> pd.DataFrame
     return pd.DataFrame(rows, columns=ENRICHED_COLUMNS).drop_duplicates(subset=["title", "year"])
 
 
+def interactive_command(args: argparse.Namespace) -> int:
+    print("CineMatch interactive recommender")
+    print("--------------------------------")
+
+    users: list[str] = []
+    while len(users) < 2:
+        raw = input(f"Enter Letterboxd username #{len(users)+1} (or q to quit): ").strip()
+        if raw.casefold() in {"q", "quit"}:
+            return 0
+        if not raw:
+            print("Please enter a username.")
+            continue
+        try:
+            summary = _profile_summary(raw)
+            print(f"Profile check: {raw} ({summary['rated']} rated movies)")
+            if summary["titles"]:
+                print("  Sample titles:")
+                for title in summary["titles"]:
+                    print(f"   - {title}")
+            if _yes_no("Use this profile?", default=True):
+                users.append(raw)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Could not use profile {raw!r}: {exc}")
+            print("Try another username.")
+
+    print()
+    print("Enter candidate movie titles separated by commas.")
+    print("Example: Heat (1995), Dune: Part Two, The Social Network")
+    raw_movies = input("Movies: ").strip()
+    movie_inputs = _split_movies([raw_movies])
+    if not movie_inputs:
+        print("No candidate movies provided.")
+        return 0
+
+    confirmed: list[pd.DataFrame] = []
+    for raw_movie in movie_inputs:
+        movie = confirm_candidate_movie(raw_movie, top_cast=args.top_cast)
+        if movie is not None:
+            confirmed.append(movie)
+    if not confirmed:
+        print("No movies were confirmed, nothing to score.")
+        return 0
+
+    for user in users:
+        ensure_enriched_csv(
+            username=user,
+            enriched_dir=args.enriched_dir,
+            force=args.force_enrich,
+            limit=args.profile_limit,
+            top_cast=args.top_cast,
+        )
+
+    log("[2/3] Training per-user regression models...")
+    encoder, models = train_all_models(
+        enriched_dir=args.enriched_dir,
+        model_dir=args.model_dir,
+        model_kind=args.model_kind,
+    )
+    missing_models = [user for user in users if user not in models]
+    if missing_models:
+        raise RuntimeError(f"Missing trained models for: {missing_models}")
+
+    log("[3/3] Scoring confirmed candidate movies...")
+    candidates = pd.concat(confirmed, ignore_index=True).drop_duplicates(subset=["title", "year"])
+    ranked = score_candidate_frame(encoder, models, users, candidates, lam=args.lam)
+    print_scored_results(ranked, users, args.lam)
+    return 0
+
+
 def mutual_command(args: argparse.Namespace) -> int:
     users = list(dict.fromkeys(args.users))
     if len(users) != 2:
@@ -313,13 +502,23 @@ def build_parser() -> argparse.ArgumentParser:
     mutual.add_argument("--enriched-dir", type=Path, default=DEFAULT_ENRICHED_DIR)
     mutual.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
     mutual.set_defaults(func=mutual_command)
+
+    interactive = sub.add_parser("interactive", help="Guided prompt flow with validation/confirmation")
+    interactive.add_argument("--lambda", dest="lam", type=float, default=1.0)
+    interactive.add_argument("--model-kind", choices=["ridge", "lasso", "best"], default="best")
+    interactive.add_argument("--force-enrich", action="store_true")
+    interactive.add_argument("--profile-limit", type=int, default=300)
+    interactive.add_argument("--top-cast", type=int, default=3)
+    interactive.add_argument("--enriched-dir", type=Path, default=DEFAULT_ENRICHED_DIR)
+    interactive.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
+    interactive.set_defaults(func=interactive_command)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     raw_args = sys.argv[1:] if argv is None else argv
     if not raw_args:
-        raw_args = ["mutual", "--help"]
+        raw_args = ["interactive"]
     args = build_parser().parse_args(raw_args)
     try:
         return args.func(args)
