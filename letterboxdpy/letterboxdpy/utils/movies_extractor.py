@@ -63,13 +63,30 @@ def extract_movies_from_vertical_list(dom, max_items=20*5) -> dict:
     """
     def get_movie_data(item):
         """Extract movie ID, slug, and name from container element."""
+        import json
         from letterboxdpy.utils.utils_string import extract_year_from_movie_name, clean_movie_name
-        
+
         react_component = item.find("div", {"class": "react-component"}) if item.name == "li" else item
-        if not react_component or 'data-film-id' not in react_component.attrs:
+        if not react_component:
             return None
-            
-        movie_id = react_component['data-film-id']
+
+        movie_id = react_component.get('data-film-id')
+        if not movie_id:
+            # Letterboxd moved the numeric film id into data-postered-identifier JSON
+            # (uid format: "film:478428"). Recover it from there when the legacy
+            # attribute is missing.
+            identifier = react_component.get('data-postered-identifier')
+            if identifier:
+                try:
+                    uid = json.loads(identifier).get('uid', '')
+                    if uid.startswith('film:'):
+                        movie_id = uid.split(':', 1)[1]
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+
+        if not movie_id:
+            return None
+
         movie_slug = react_component.get('data-item-slug') or react_component.get('data-film-slug')
         raw_name = react_component.get('data-item-name') or react_component.img['alt']
         movie_name = clean_movie_name(raw_name)

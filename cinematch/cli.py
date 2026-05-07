@@ -4,6 +4,7 @@ import argparse
 import os
 import re
 import sys
+import warnings
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +12,8 @@ import requests
 
 from cinematch.joint import score_columns
 from cinematch.models import train_all_models
+
+warnings.filterwarnings("ignore", category=UserWarning, module=r"letterboxdpy.*")
 
 DEFAULT_ENRICHED_DIR = Path("data/enriched")
 DEFAULT_MODEL_DIR = Path("models")
@@ -32,6 +35,13 @@ ENRICHED_COLUMNS = [
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def _friendly_profile_error(username: str, exc: Exception) -> str:
+    text = str(exc)
+    if '"code": 404' in text or "404" in text:
+        return f"Couldn't find user {username!r} on Letterboxd."
+    return f"Could not load profile {username!r}: {text.splitlines()[0]}"
 
 
 def _yes_no(prompt: str, default: bool = True) -> bool:
@@ -69,6 +79,13 @@ def _parse_movie_input(raw: str) -> tuple[str, int | None]:
     if match:
         return match.group("title").strip(), int(match.group("year"))
     return text, None
+
+
+def _positive_int(s: str) -> int:
+    n = int(s)
+    if n <= 0:
+        raise argparse.ArgumentTypeError("must be greater than 0")
+    return n
 
 
 def _split_movies(values: list[str]) -> list[str]:
@@ -380,25 +397,38 @@ def interactive_command(args: argparse.Namespace) -> int:
     print("--------------------------------")
 
     users: list[str] = []
-    while len(users) < 2:
-        raw = input(f"Enter Letterboxd username #{len(users)+1} (or q to quit): ").strip()
+    while True:
+        if not users:
+            prompt = "Enter Letterboxd username #1 (or q to quit): "
+        else:
+            prompt = f"Enter Letterboxd username #{len(users)+1} (Enter or 'done' to finish, q to quit): "
+        raw = input(prompt).strip()
         if raw.casefold() in {"q", "quit"}:
+            if users:
+                break
             return 0
-        if not raw:
-            print("Please enter a username.")
+        if not raw or raw.casefold() in {"done", "d"}:
+            if users:
+                break
+            print("Please enter at least one username.")
             continue
         try:
             summary = _profile_summary(raw)
-            print(f"Profile check: {raw} ({summary['rated']} rated movies)")
-            if summary["titles"]:
-                print("  Sample titles:")
-                for title in summary["titles"]:
-                    print(f"   - {title}")
-            if _yes_no("Use this profile?", default=True):
-                users.append(raw)
         except Exception as exc:  # noqa: BLE001
-            print(f"Could not use profile {raw!r}: {exc}")
+            print(_friendly_profile_error(raw, exc))
             print("Try another username.")
+            continue
+        print(f"Profile check: {raw} ({summary['rated']} rated movies)")
+        if summary["rated"] < 10:
+            print(f"  {raw} has only {summary['rated']} rated movies; we need at least 10 to learn taste.")
+            print("Try another username.")
+            continue
+        if summary["titles"]:
+            print("  Sample titles:")
+            for title in summary["titles"]:
+                print(f"   - {title}")
+        if _yes_no("Use this profile?", default=True):
+            users.append(raw)
 
     print()
     print("Enter candidate movie titles separated by commas.")
@@ -446,17 +476,20 @@ def interactive_command(args: argparse.Namespace) -> int:
 
 def mutual_command(args: argparse.Namespace) -> int:
     users = list(dict.fromkeys(args.users))
-    if len(users) != 2:
-        raise SystemExit("Provide exactly two usernames with --users")
+    if not users:
+        raise SystemExit("Provide at least one username with --users")
 
     for user in users:
-        ensure_enriched_csv(
-            username=user,
-            enriched_dir=args.enriched_dir,
-            force=args.force_enrich,
-            limit=args.profile_limit,
-            top_cast=args.top_cast,
-        )
+        try:
+            ensure_enriched_csv(
+                username=user,
+                enriched_dir=args.enriched_dir,
+                force=args.force_enrich,
+                limit=args.profile_limit,
+                top_cast=args.top_cast,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise SystemExit(_friendly_profile_error(user, exc))
 
     log("[2/3] Training per-user regression models...")
     encoder, models = train_all_models(
@@ -485,9 +518,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     mutual = sub.add_parser(
         "mutual",
-        help="Two-user mutual recommendation from candidate movie list",
+        help="Group recommendation from candidate movie list (one or more users)",
     )
-    mutual.add_argument("--users", nargs=2, required=True, help="Two Letterboxd usernames")
+    mutual.add_argument("--users", nargs="+", required=True, metavar="USERNAME", help="One or more Letterboxd usernames")
     mutual.add_argument(
         "--movies",
         nargs="+",
@@ -497,7 +530,7 @@ def build_parser() -> argparse.ArgumentParser:
     mutual.add_argument("--lambda", dest="lam", type=float, default=1.0)
     mutual.add_argument("--model-kind", choices=["ridge", "lasso", "best"], default="best")
     mutual.add_argument("--force-enrich", action="store_true")
-    mutual.add_argument("--profile-limit", type=int, default=300)
+    mutual.add_argument("--profile-limit", type=_positive_int, default=300)
     mutual.add_argument("--top-cast", type=int, default=3)
     mutual.add_argument("--enriched-dir", type=Path, default=DEFAULT_ENRICHED_DIR)
     mutual.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
@@ -507,7 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
     interactive.add_argument("--lambda", dest="lam", type=float, default=1.0)
     interactive.add_argument("--model-kind", choices=["ridge", "lasso", "best"], default="best")
     interactive.add_argument("--force-enrich", action="store_true")
-    interactive.add_argument("--profile-limit", type=int, default=300)
+    interactive.add_argument("--profile-limit", type=_positive_int, default=300)
     interactive.add_argument("--top-cast", type=int, default=3)
     interactive.add_argument("--enriched-dir", type=Path, default=DEFAULT_ENRICHED_DIR)
     interactive.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR)
@@ -522,7 +555,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(raw_args)
     try:
         return args.func(args)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, EOFError):
         print("\nCanceled.")
         return 130
     except Exception as exc:  # noqa: BLE001

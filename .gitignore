@@ -6,3 +6,5 @@ data/tmdb_cache/
 models/
 .env
 data/enriched/
+.claude/
+reviasion_resources/
