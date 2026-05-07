@@ -43,7 +43,6 @@ Clone and enter the project:
 
 ```bash
 git clone https://github.com/Arell-Git/cinematch_cli.git
-cd ltrboxd_scraper
 ```
 
 Create and activate a virtual environment:
