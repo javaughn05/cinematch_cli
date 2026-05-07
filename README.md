@@ -42,7 +42,7 @@ where disagreement is the standard deviation across user predictions.
 Clone and enter the project:
 
 ```bash
-git clone https://github.com/Arell-Git/cinematch_cli.git
+git clone https://github.com/javaughn05/cinematch_cli
 ```
 
 Create and activate a virtual environment:
