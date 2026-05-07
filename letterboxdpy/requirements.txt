@@ -1,0 +1,4 @@
+beautifulsoup4>=4.12.3
+lxml>=5.1.0
+curl_cffi>=0.15.0
+fastfingertips>=0.1.3
